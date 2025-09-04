@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Chat</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.5.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #messages { border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: auto; margin-top: 10px; }
+        #messageInput { width: 70%; padding: 5px; }
+        button { padding: 5px 10px; margin-left: 5px; }
+        .error { color: red; }
+        .success { color: green; }
+        .token-input { width: 500px; padding: 5px; }
+        .join-form { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+<h2>WebSocket Chat</h2>
+
+<div class="join-form">
+    <label>JWT Token:</label><br>
+    <input type="text" id="tokenInput" class="token-input" placeholder="Enter your JWT token">
+</div>
+
+<div class="join-form">
+    <label>Username:</label><br>
+    <input type="text" id="usernameInput" placeholder="Enter your username">
+</div>
+
+<div class="join-form">
+    <label>Room ID:</label><br>
+    <input type="text" id="roomIdInput" placeholder="Enter room ID">
+    <button onclick="joinRoom()">Join Room</button>
+</div>
+
+<div id="connectionStatus"></div>
+
+<div id="chatArea" style="display: none;">
+    <div>
+        <input type="text" id="messageInput" placeholder="Type a message..." disabled>
+        <button onclick="sendMessage()" id="sendButton" disabled>Send</button>
+    </div>
+
+    <h3>Messages:</h3>
+    <div id="messages"></div>
+</div>
+
+<script>
+    let stompClient = null;
+    let socket = null;
+    let currentRoomId = null;
+
+    function updateConnectionStatus(message, isError = false) {
+        const statusDiv = document.getElementById('connectionStatus');
+        statusDiv.innerHTML = `<p class="${isError ? 'error' : 'success'}">${message}</p>`;
+    }
+
+    function connect(roomId, username) {
+        // Disconnect if already connected
+        if (stompClient) {
+            stompClient.disconnect();
+            stompClient = null;
+        }
+        if (socket) {
+            socket.close();
+            socket = null;
+        }
+
+        const token = document.getElementById("tokenInput").value.trim();
+        if (!token) {
+            updateConnectionStatus("Please enter a valid JWT token", true);
+            return;
+        }
+
+        try {
+            // Create new SockJS connection
+            const socketUrl = '/chat';
+            socket = new SockJS(socketUrl);
+            stompClient = Stomp.over(socket);
+            
+            // Disable debug logging
+            stompClient.debug = null;
+
+            updateConnectionStatus("Connecting...");
+            
+            // Add token to STOMP headers
+            const headers = {
+                'Authorization': 'Bearer ' + token
+            };
+            
+            stompClient.connect(headers, 
+                function(frame) {
+                    console.log('Connected: ' + frame);
+                    updateConnectionStatus("Connected successfully!");
+                    
+                    // Subscribe to room messages
+                    stompClient.subscribe('/topic/chat/' + roomId, function(response) {
+                        try {
+                            const message = JSON.parse(response.body);
+                            displayMessage(message);
+                        } catch (error) {
+                            console.error("Error parsing message:", error);
+                            displayMessage({
+                                messageType: 'CHAT',
+                                sender: 'System',
+                                content: response.body
+                            });
+                        }
+                    });
+
+                    // Send join message
+                    const joinMessage = {
+                        sender: username,
+                        content: username + ' joined the room',
+                        messageType: 'JOIN'
+                    };
+                    stompClient.send("/app/chat/" + roomId + "/addUser", headers, JSON.stringify(joinMessage));
+
+                    // Enable chat interface
+                    document.getElementById("messageInput").disabled = false;
+                    document.getElementById("sendButton").disabled = false;
+                    document.getElementById("chatArea").style.display = "block";
+                    currentRoomId = roomId;
+                },
+                function(error) {
+                    console.error("Connection error:", error);
+                    updateConnectionStatus("Connection failed: " + error, true);
+                    document.getElementById("messageInput").disabled = true;
+                    document.getElementById("sendButton").disabled = true;
+                    document.getElementById("chatArea").style.display = "none";
+                    currentRoomId = null;
+                }
+            );
+        } catch (error) {
+            console.error("Error setting up connection:", error);
+            updateConnectionStatus("Error setting up connection: " + error.message, true);
+        }
+    }
+
+    function joinRoom() {
+        const username = document.getElementById("usernameInput").value.trim();
+        const roomId = document.getElementById("roomIdInput").value.trim();
+        
+        if (!username) {
+            updateConnectionStatus("Please enter a username", true);
+            return;
+        }
+        if (!roomId) {
+            updateConnectionStatus("Please enter a room ID", true);
+            return;
+        }
+
+        connect(roomId, username);
+    }
+
+    function displayMessage(message) {
+        const messageElement = document.createElement('p');
+        if (message.messageType === 'JOIN') {
+            messageElement.style.color = 'green';
+            messageElement.textContent = `${message.content}`;
+        } else if (message.messageType === 'LEAVE') {
+            messageElement.style.color = 'red';
+            messageElement.textContent = `${message.content}`;
+        } else {
+            messageElement.textContent = `${message.sender}: ${message.content}`;
+        }
+        
+        document.getElementById("messages").appendChild(messageElement);
+        // Scroll to bottom
+        const messagesDiv = document.getElementById("messages");
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function sendMessage() {
+        if (!stompClient || !stompClient.connected || !currentRoomId) {
+            updateConnectionStatus("Not connected to WebSocket or room", true);
+            return;
+        }
+
+        const messageInput = document.getElementById("messageInput");
+        const content = messageInput.value.trim();
+        
+        if (!content) {
+            return;
+        }
+
+        try {
+            const chatMessage = {
+                sender: document.getElementById("usernameInput").value,
+                content: content,
+                messageType: 'CHAT'
+            };
+
+            const headers = {
+                'Authorization': 'Bearer ' + document.getElementById("tokenInput").value.trim()
+            };
+
+            stompClient.send("/app/chat/" + currentRoomId + "/sendMessage", headers, JSON.stringify(chatMessage));
+            messageInput.value = "";
+        } catch (error) {
+            console.error("Error sending message:", error);
+            updateConnectionStatus("Error sending message: " + error.message, true);
+        }
+    }
+
+    // Add enter key listener for message input
+    document.getElementById("messageInput").addEventListener("keypress", function(event) {
+        if (event.key === "Enter") {
+            sendMessage();
+        }
+    });
+
+    // Clean up on page unload
+    window.onbeforeunload = function() {
+        if (stompClient && stompClient.connected && currentRoomId) {
+            try {
+                const headers = {
+                    'Authorization': 'Bearer ' + document.getElementById("tokenInput").value.trim()
+                };
+                
+                const leaveMessage = {
+                    sender: document.getElementById("usernameInput").value,
+                    content: document.getElementById("usernameInput").value + ' left the room',
+                    messageType: 'LEAVE'
+                };
+                stompClient.send("/app/chat/" + currentRoomId + "/sendMessage", headers, JSON.stringify(leaveMessage));
+                stompClient.disconnect();
+            } catch (error) {
+                console.error("Error during cleanup:", error);
+            }
+        }
+        if (socket) {
+            socket.close();
+        }
+    };
+</script>
+</body>
+</html>
